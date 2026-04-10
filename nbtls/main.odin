@@ -43,7 +43,6 @@ accept_cb :: proc(op: ^nbio.Operation) {
 	nbio.poll_poly(op.accept.client, .Receive, conn, negotiate_cb)
 }
 
-
 negotiate_cb :: proc(op: ^nbio.Operation, conn: ^s2n.Connection) {
 	fmt.println("negotiate_cb")
 	blocked: s2n.Blocked_Status
