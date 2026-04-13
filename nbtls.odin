@@ -2,7 +2,6 @@ package nbtls
 
 import "base:runtime"
 import "core:c"
-import "core:fmt"
 import "core:nbio"
 import "core:os"
 import "core:strings"
@@ -43,7 +42,6 @@ Specifics :: struct #raw_union {
 
 Accept :: struct {
 	socket:      nbio.TCP_Socket,
-	config:      ^Config,
 	server_name: string,
 }
 
@@ -70,22 +68,38 @@ Error :: union {
 	nbio.Send_Error,
 }
 
-config_init :: proc() -> ^Config {
+_base_config: ^Config
+
+init :: proc() {
 	s2n.s2n_init()
+	_base_config = config_init()
+
+	saved_ctx := new_clone(context)
+	assert(s2n.s2n_config_set_ctx(_base_config, saved_ctx) == s2n.Success)
+	assert(
+		s2n.s2n_config_set_client_hello_cb(_base_config, client_hello_cb, saved_ctx) ==
+		s2n.Success,
+	)
+	assert(s2n.s2n_config_set_client_hello_cb_mode(_base_config, .Nonblocking) == s2n.Success)
+}
+
+destroy :: proc() {
+	config_destroy(_base_config)
+}
+
+config_init :: proc() -> ^Config {
 	return s2n.s2n_config_new()
 }
 
 config_init_with_cert_and_key_file :: proc(
 	cert_file: string,
 	key_file: string,
-	cb: Callback,
 	allocator := context.allocator,
 ) -> ^Config {
 	cert_pem, _ := os.read_entire_file(cert_file, allocator)
 	key_pem, _ := os.read_entire_file(key_file, allocator)
 	defer delete(cert_pem)
 	defer delete(key_pem)
-
 	return config_init_with_cert_and_key(string(cert_pem), string(key_pem), allocator)
 }
 
@@ -106,42 +120,27 @@ config_init_with_cert_and_key :: proc(
 	return config
 }
 
-config_init_with_cert_cb :: proc() -> ^Config {
-	config := config_init()
-
-	saved_ctx := new_clone(context)
-	assert(s2n.s2n_config_set_ctx(config, saved_ctx) == s2n.Success)
-	assert(s2n.s2n_config_set_client_hello_cb(config, client_hello_cb, saved_ctx) == s2n.Success)
-	assert(s2n.s2n_config_set_client_hello_cb_mode(config, .Nonblocking) == s2n.Success)
-
-	return config
-}
-
 config_destroy :: proc(config: ^Config) {
 	ctx: rawptr
 	s2n.s2n_config_get_ctx(config, &ctx)
 	if ctx != nil {
 		free(ctx)
 	}
-
 	s2n.s2n_config_free(config)
 }
 
-accept :: proc(socket: nbio.TCP_Socket, config: ^Config, cb: Callback) {
-	tlsop := new_clone(
-		Operation{cb = cb, type = .Accept, accept = {socket = socket, config = config}},
-	)
+accept :: proc(socket: nbio.TCP_Socket, cb: Callback) {
+	tlsop := new_clone(Operation{cb = cb, type = .Accept, accept = {socket = socket}})
 	nbio.accept_poly(socket, tlsop, accept_cb)
 
 	accept_cb :: proc(op: ^nbio.Operation, tlsop: ^Operation) {
-		fmt.println("accept_cb")
 		assert(op.accept.err == nil)
 		assert(tlsop.type == .Accept)
 
 		tlsop.conn = s2n.s2n_connection_new(.Server)
 		assert(tlsop.conn != nil)
 
-		assert(s2n.s2n_connection_set_config(tlsop.conn, tlsop.accept.config) == s2n.Success)
+		assert(s2n.s2n_connection_set_config(tlsop.conn, _base_config) == s2n.Success)
 		assert(s2n.s2n_connection_set_fd(tlsop.conn, c.int(op.accept.client)) == s2n.Success)
 		assert(s2n.s2n_connection_set_ctx(tlsop.conn, tlsop) == s2n.Success)
 
@@ -192,8 +191,6 @@ client_hello_cb :: proc "c" (conn: ^Connection, ctx: rawptr) -> c.int {
 }
 
 handshake :: proc(conn: ^Connection, config: ^Config, cb: Callback) {
-	fmt.println("handshake set_cert")
-
 	socket: nbio.TCP_Socket
 	assert(s2n.s2n_connection_get_read_fd(conn, transmute(^c.int)&socket) == s2n.Success)
 	assert(s2n.s2n_client_hello_cb_done(conn) == s2n.Success)
